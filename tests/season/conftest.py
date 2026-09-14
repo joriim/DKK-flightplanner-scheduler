@@ -170,6 +170,13 @@ class FakeHost:
     max_height_agl_m: float = 110.0
     forecast_url: str = "https://example.invalid/forecast"
     forecast_ttl_hours: float = 3.0
+    #: Host weather settings the season module reads rather than duplicates.
+    drone_wind_limit_ms: float | None = 10.0
+    daytime_start_h: int = 6
+    daytime_end_h: int = 18
+    #: Job cards, keyed by path. Empty means "derive a minimal card per job".
+    cards: dict[str, dict] = field(default_factory=dict)
+    slots: list[dict] = field(default_factory=list)
 
     @property
     def output_dir(self) -> Path:
@@ -197,6 +204,34 @@ class FakeHost:
 
     def raw_config(self) -> dict:
         return self.raw
+
+    def job_cards(self, folder: str) -> list[dict]:
+        """Minimal cards derived from the job list, unless overridden."""
+        out = []
+        for index, job in enumerate(self.jobs_in_folder(folder)):
+            if job.path in self.cards:
+                out.append(self.cards[job.path])
+                continue
+            out.append(
+                {
+                    "path": job.path,
+                    "name": job.name,
+                    "sort_order": index,
+                    "flight_time_min": 20.0,
+                    "battery_count": 1,
+                    "flight_ready": True,
+                    "takeoff_point_4326": [job.lon, job.lat]
+                    if job.has_position
+                    else None,
+                }
+            )
+        return out
+
+    def day_slots(self, folder: str) -> list[dict]:
+        return list(self.slots)
+
+    def cluster_launch_sites(self, cards: list[dict]) -> list:
+        return []
 
 
 @pytest.fixture

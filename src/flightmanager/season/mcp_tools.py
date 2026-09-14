@@ -6,15 +6,16 @@ Registered onto the host's ``FastMCP`` instance with one line in
     from flightmanager.season.mcp_tools import register
     register(mcp)
 
-Phase 1 exposes the three read tools (spec §10.3): ``season_status``,
-``campaign_detail`` and ``crop_profiles``.  ``season_opportunities`` and
-``season_day_plan`` need day-level scoring and arrive with Phase 2; the write
-tools arrive with Phase 3/4.
+Phases 1 and 2 expose the five read tools (spec §10.3): ``season_status``,
+``campaign_detail``, ``crop_profiles``, ``season_opportunities`` and
+``season_day_plan``.  The write tools arrive with Phase 3/4.
 
 These are the queries that should work end to end today::
 
     When does the emergence window open for folder hiilisyke-2027?
     Which parcels have a window closing in the next 5 days?
+    Give me the best flying day next week for the N-topdress campaigns,
+      and the route order.
     Which windows did we miss last season and why?
 
 Every payload carries its uncertainty and calibration status.  An assistant
@@ -28,6 +29,7 @@ import datetime as _dt
 import json
 from typing import Any
 
+from flightmanager.season import opportunities as _opportunities
 from flightmanager.season import store
 from flightmanager.season.config import load_season_config, load_season_tables
 from flightmanager.season.integration import FlightmanagerHost, HostUnavailable
@@ -295,8 +297,202 @@ def crop_profiles() -> str:
     )
 
 
-#: The Phase 1 read tools, in the order they are registered.
-_TOOLS = (season_status, campaign_detail, crop_profiles)
+def season_opportunities(
+    folder: str,
+    days: int = 10,
+    season: int | None = None,
+    audience: str | None = None,
+    limit: int = 5,
+) -> str:
+    """Rank the coming days for flying a folder's open campaigns, best first.
+
+    Answers "what is the best flying day next week, and why?". Each day carries
+    its component breakdown (wind, cloud, precipitation, sun elevation,
+    satellite coincidence, proximity to the campaign's target date) and the
+    contiguous local hours that actually clear the thresholds.
+
+    A score of zero means a HARD GATE failed, not that the day is merely poor:
+    outside the campaign's window, wind above the drone limit, rain above
+    threshold, no hour with the sun high enough, or the underlying job is not
+    flight-ready. Report the gate, not just the number.
+
+    At this latitude the sun is often the binding constraint: multispectral
+    work needs the sun above 30 deg, which at 62.8 N is impossible outside
+    roughly late March to mid September whatever the weather does. When nothing
+    is flyable the payload says which gate caused it.
+
+    Args:
+        folder: Output subfolder holding the parcels.
+        days: How many days ahead to score (1-30). The forecast runs ~14 days;
+            beyond that every day rests on climatological normals.
+        season: Season year. Defaults to the current year.
+        audience: Limit to "farmer" or "researcher" campaigns.
+        limit: How many ranked days to return.
+    """
+    try:
+        host, cfg, tables = _context()
+    except (HostUnavailable, ValueError) as exc:
+        return _err(str(exc))
+
+    year = _year(season)
+    try:
+        report = _opportunities.find_opportunities(
+            host,
+            tables,
+            cfg,
+            folder,
+            year,
+            days=max(1, min(days, 30)),
+            audience=audience,
+        )
+    except Exception as exc:
+        return _err(str(exc))
+
+    flyable = report.flyable()
+    return _dump(
+        {
+            "folder": folder,
+            "season": year,
+            "today": report.today.isoformat(),
+            "campaigns_considered": report.campaigns_considered,
+            "flyable_days": len(flyable),
+            "weather_stale": report.weather_stale,
+            "days": [_opportunity_row(o) for o in flyable[: max(1, limit)]],
+            "warnings": report.warnings,
+            "notices": report.notices,
+        }
+    )
+
+
+def _opportunity_row(o) -> dict[str, Any]:
+    return {
+        "date": o.date.isoformat(),
+        "weekday": o.date.strftime("%A"),
+        "score": o.score,
+        "best_hours": o.best_hours or "none — no hour clears the thresholds",
+        "components": o.components,
+        "conditions": {
+            "wind_ms": o.wind_ms,
+            "gust_ms": o.gust_ms,
+            "cloud_pct": o.cloud_pct,
+            "precip_mm": o.precip_mm,
+            "max_solar_elevation_deg": o.max_solar_elevation_deg,
+        },
+        "campaigns": [
+            {
+                "campaign_id": c.campaign_id,
+                "label_en": c.label_en,
+                "job": c.job_path,
+                "score": c.score,
+                "days_to_close": c.days_to_close,
+                "priority": c.priority,
+            }
+            for c in o.servable()
+        ],
+        "blocked": [
+            {
+                "campaign_id": c.campaign_id,
+                "label_en": c.label_en,
+                "gates_failed": c.gates_failed,
+            }
+            for c in o.per_campaign
+            if c.blocked
+        ],
+        "flags": o.flags,
+    }
+
+
+def season_day_plan(
+    folder: str,
+    date: str,
+    season: int | None = None,
+    audience: str | None = None,
+) -> str:
+    """The field-day plan for one date: parcels, route order, batteries, sites.
+
+    Use after season_opportunities to turn "fly Thursday" into "these seven
+    parcels, in this order, two batteries". Route order is the folder's own
+    saved flight sequence when it has one, and greedy nearest-neighbour
+    otherwise — ``order_source`` says which.
+
+    Parcels that do not fit the configured field-day budget appear under
+    ``deferred`` with the reason, split by campaign priority and then by how
+    soon each window closes. They are never silently dropped.
+
+    Args:
+        folder: Output subfolder holding the parcels.
+        date: The field day, ISO YYYY-MM-DD. Must be within the scored horizon.
+        season: Season year. Defaults to the current year.
+        audience: Limit to "farmer" or "researcher" campaigns.
+    """
+    try:
+        host, cfg, tables = _context()
+    except (HostUnavailable, ValueError) as exc:
+        return _err(str(exc))
+
+    try:
+        target = _dt.date.fromisoformat(date)
+    except ValueError:
+        return _err(f"{date!r} is not an ISO date (YYYY-MM-DD)")
+
+    try:
+        plan, opportunity, report = _opportunities.field_day(
+            host, tables, cfg, folder, _year(season), target, audience=audience
+        )
+    except Exception as exc:
+        return _err(str(exc))
+
+    return _dump(
+        {
+            "date": target.isoformat(),
+            "weekday": target.strftime("%A"),
+            "folder": folder,
+            "day_score": opportunity.score if opportunity else 0.0,
+            "best_hours": plan.best_hours,
+            "order_source": plan.order_source,
+            "route": [
+                {
+                    "position": j.route_index,
+                    "job": j.job_path,
+                    "name": j.name,
+                    "flight_time_min": j.flight_time_min,
+                    "batteries": j.battery_count,
+                    "campaigns": j.campaign_labels,
+                    "days_to_close": j.days_to_close,
+                }
+                for j in plan.jobs
+            ],
+            "totals": {
+                "flight_time_h": plan.total_flight_time_h,
+                "batteries": plan.total_battery_count,
+                "parcels": len(plan.jobs),
+                "budget_h": plan.max_field_day_hours,
+                "over_budget": plan.overflows,
+            },
+            "launch_sites": plan.launch_sites,
+            "deferred": [
+                {
+                    "job": j.job_path,
+                    "name": j.name,
+                    "priority": j.priority,
+                    "days_to_close": j.days_to_close,
+                }
+                for j in plan.deferred
+            ],
+            "warnings": plan.warnings,
+            "notices": plan.notices + report.notices,
+        }
+    )
+
+
+#: The Phase 1 and 2 read tools, in the order they are registered.
+_TOOLS = (
+    season_status,
+    campaign_detail,
+    crop_profiles,
+    season_opportunities,
+    season_day_plan,
+)
 
 
 def register(mcp: Any) -> None:

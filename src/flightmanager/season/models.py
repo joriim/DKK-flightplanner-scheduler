@@ -509,3 +509,84 @@ def make_campaign_id(
     """
     base = f"{season}-{type_id}-{scope_key}"
     return base if repeat_index == 0 else f"{base}-r{repeat_index}"
+
+
+# ---------------------------------------------------------------------------
+# Opportunity (spec §4.5) — never persisted, computed on demand
+# ---------------------------------------------------------------------------
+
+
+class CampaignScore(BaseModel):
+    """One campaign's score on one candidate day.
+
+    Components are reported alongside the total because operators need to see
+    *why* Thursday beat Tuesday (spec §7.4) — a bare number invites either
+    blind trust or blind dismissal, and both are wrong.
+    """
+
+    model_config = ConfigDict(extra="allow")
+
+    campaign_id: str
+    type_id: str
+    label_fi: str = ""
+    label_en: str = ""
+    job_path: str = ""
+    #: Carried from the campaign type so the field-day planner can break
+    #: overflow ties without re-reading the campaign library.
+    priority: Priority = "normal"
+    score: float = Field(ge=0.0, le=1.0)
+    components: dict[str, float] = Field(default_factory=dict)
+    #: Hard gates that zeroed this score outright, if any.
+    gates_failed: list[str] = Field(default_factory=list)
+    flags: list[str] = Field(default_factory=list)
+    days_from_target: int | None = None
+    days_to_close: int | None = None
+
+    @property
+    def blocked(self) -> bool:
+        return bool(self.gates_failed)
+
+
+class Opportunity(BaseModel):
+    """One candidate calendar day, scored for the campaigns it could serve.
+
+    Short-lived: computed from the forecast and cached only for as long as the
+    forecast behind it is valid.  Never written into the season plan — a stored
+    score would be a stale score.
+    """
+
+    model_config = ConfigDict(extra="allow")
+
+    date: _dt.date
+    campaign_ids: list[str] = Field(default_factory=list)
+    #: The day's headline score: the best campaign it serves. A day is worth
+    #: flying because *something* on it scores well, not because everything
+    #: averages out — the mean is carried separately for ranking ties.
+    score: float = Field(default=0.0, ge=0.0, le=1.0)
+    mean_score: float = Field(default=0.0, ge=0.0, le=1.0)
+    #: Day-level components, shared by every campaign scored on this day.
+    components: dict[str, float] = Field(default_factory=dict)
+    per_campaign: list[CampaignScore] = Field(default_factory=list)
+    flags: list[str] = Field(default_factory=list)
+    #: Contiguous local-hour spans meeting elevation, wind and cloud thresholds.
+    best_hours: list[str] = Field(default_factory=list)
+    #: Conditions behind the components, for display.
+    wind_ms: float | None = None
+    gust_ms: float | None = None
+    cloud_pct: float | None = None
+    precip_mm: float | None = None
+    max_solar_elevation_deg: float | None = None
+    satellite_passes: list[dict] = Field(default_factory=list)
+    weather_stale: bool = False
+
+    @property
+    def flyable(self) -> bool:
+        return self.score > 0 and bool(self.best_hours)
+
+    def servable(self) -> list[CampaignScore]:
+        """Campaigns this day can actually serve, best first."""
+        return sorted(
+            (c for c in self.per_campaign if not c.blocked),
+            key=lambda c: c.score,
+            reverse=True,
+        )

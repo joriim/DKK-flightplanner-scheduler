@@ -5,10 +5,10 @@ Wired into the host CLI with two lines in ``cli.py``::
     from flightmanager.season.cli import season_app
     app.add_typer(season_app, name="season")
 
-Phase 1 ships ``init``, ``plan`` and ``status``.  The remaining verbs from spec
-§10.1 (``next``, ``day``, ``apply``, ``log``, ``calibrate``, ``export``) belong
-to later phases and are absent rather than stubbed, so ``--help`` never advertises
-something that does not work.
+Phases 1 and 2 ship ``init``, ``plan``, ``status``, ``next``, ``day`` and
+``export``.  The remaining verbs from spec §10.1 (``apply``, ``log``,
+``calibrate``) belong to Phases 3 and 4 and are absent rather than stubbed, so
+``--help`` never advertises something that does not work.
 """
 
 from __future__ import annotations
@@ -19,9 +19,10 @@ from typing import Optional
 
 import typer
 
-from flightmanager.season import store
+from flightmanager.season import ics, opportunities, store
 from flightmanager.season.config import load_season_config, load_season_tables
 from flightmanager.season.integration import HostUnavailable, load_host
+from flightmanager.season.models import Opportunity
 from flightmanager.season.planner import (
     DEFAULT_CLOSING_DAYS,
     PlanError,
@@ -397,3 +398,266 @@ def windows_cmd(
             "  ⚠ manual window override in effect — the model's dates are ignored"
         )
     _print_lines(found.reasons, "  ·")
+
+
+# ---------------------------------------------------------------------------
+# Phase 2 — scheduling
+# ---------------------------------------------------------------------------
+
+
+def _parse_date(text: str, flag: str) -> _dt.date:
+    try:
+        return _dt.date.fromisoformat(text)
+    except ValueError:
+        typer.echo(f"Error: {flag} {text!r} is not YYYY-MM-DD.", err=True)
+        raise typer.Exit(1)
+
+
+def _load_plan_or_fail(host, folder: str, year: int):
+    try:
+        folder_dir = host.folder_dir(folder)
+        plan = store.load_plan(folder_dir, year)
+    except (ValueError, store.SeasonStoreError) as exc:
+        _fail(exc)
+    if plan is None:
+        typer.echo(_no_plan_message(folder_dir, folder, year), err=True)
+        raise typer.Exit(1)
+    return plan
+
+
+@season_app.command("next")
+def next_cmd(
+    folder: str = _FOLDER_OPT,
+    days: int = typer.Option(
+        opportunities.DEFAULT_HORIZON_DAYS, "--days", help="Horizon to score, in days."
+    ),
+    season: Optional[int] = _SEASON_OPT,
+    audience: Optional[str] = typer.Option(
+        None, "--audience", help="farmer | researcher | both"
+    ),
+    limit: int = typer.Option(10, "--limit", help="How many days to print."),
+    show_all: bool = typer.Option(
+        False, "--all", help="Include days nothing can be flown on."
+    ),
+    config_path: str = _CONFIG_OPT,
+) -> None:
+    """Score the coming days and rank them, best first.
+
+    Shows the component breakdown, not just the total: operators need to see
+    why Thursday beat Tuesday.
+
+      flightmanager season next --folder hiilisyke-2027 --days 10
+    """
+    host, cfg, tables = _context(config_path)
+    year = _year(season)
+    try:
+        report = opportunities.find_opportunities(
+            host, tables, cfg, folder, year, days=days, audience=audience
+        )
+    except (PlanError, ValueError, OSError) as exc:
+        _fail(exc)
+
+    typer.echo(
+        f"Season {year}, folder {folder} — {report.campaigns_considered} open "
+        f"campaign(s) scored over {days} day(s)"
+    )
+    rows = report.opportunities if show_all else report.flyable()
+    if not rows:
+        typer.echo("\nNo flyable day in this horizon.")
+    for opportunity in rows[:limit]:
+        _render_opportunity(opportunity)
+
+    _print_lines(report.warnings, "\n⚠")
+    for notice in report.notices:
+        typer.echo(f"\nℹ {notice}")
+    if best := report.best():
+        typer.echo(
+            f"\nBest: {best.date.isoformat()} "
+            f"({best.date.strftime('%A')}) — "
+            f"{len(best.campaign_ids)} campaign(s), {' '.join(best.best_hours) or 'no usable hours'}"
+        )
+        typer.echo(
+            f"Next: flightmanager season day --folder {folder} --date {best.date.isoformat()}"
+        )
+
+
+def _render_opportunity(opportunity: Opportunity) -> None:
+    """One scored day, with the components that produced the number."""
+    weekday = opportunity.date.strftime("%a")
+    typer.echo(
+        f"\n{opportunity.date.isoformat()} {weekday}  score {opportunity.score:.2f}"
+        f"  ({len(opportunity.campaign_ids)} campaign(s))"
+    )
+    conditions = []
+    if opportunity.wind_ms is not None:
+        conditions.append(f"wind {opportunity.wind_ms:.0f} m/s")
+    if opportunity.gust_ms is not None:
+        conditions.append(f"gust {opportunity.gust_ms:.0f}")
+    if opportunity.cloud_pct is not None:
+        conditions.append(f"cloud {opportunity.cloud_pct:.0f}%")
+    if opportunity.precip_mm is not None:
+        conditions.append(f"rain {opportunity.precip_mm:.1f} mm")
+    if opportunity.max_solar_elevation_deg is not None:
+        conditions.append(f"sun ≤{opportunity.max_solar_elevation_deg:.0f}°")
+    if conditions:
+        typer.echo("  " + "  ".join(conditions))
+    if opportunity.best_hours:
+        typer.echo(f"  best hours: {', '.join(opportunity.best_hours)}")
+
+    parts = "  ".join(
+        f"{name}={value:.2f}" for name, value in sorted(opportunity.components.items())
+    )
+    if parts:
+        typer.echo(f"  components: {parts}")
+    for score in opportunity.servable()[:4]:
+        typer.echo(
+            f"    {score.score:.2f}  {score.label_en:<26} {score.job_path}"
+            + (
+                f"  (closes in {score.days_to_close} d)"
+                if score.days_to_close is not None
+                else ""
+            )
+        )
+    _print_lines(opportunity.flags[:4], "    ·")
+
+
+@season_app.command("day")
+def day_cmd(
+    folder: str = _FOLDER_OPT,
+    date: str = typer.Option(..., "--date", help="The field day to plan (YYYY-MM-DD)."),
+    season: Optional[int] = _SEASON_OPT,
+    audience: Optional[str] = typer.Option(
+        None, "--audience", help="farmer | researcher | both"
+    ),
+    max_hours: Optional[float] = typer.Option(
+        None, "--max-hours", help="Override max_field_day_hours."
+    ),
+    config_path: str = _CONFIG_OPT,
+) -> None:
+    """The field-day plan for one date: parcels, route order, batteries.
+
+    flightmanager season day --folder hiilisyke-2027 --date 2027-06-04
+    """
+    host, cfg, tables = _context(config_path)
+    year = _year(season)
+    target = _parse_date(date, "--date")
+    try:
+        plan, opportunity, report = opportunities.field_day(
+            host,
+            tables,
+            cfg,
+            folder,
+            year,
+            target,
+            audience=audience,
+            max_hours=max_hours,
+        )
+    except (PlanError, ValueError, OSError) as exc:
+        _fail(exc)
+
+    _render_field_day(plan, opportunity, report, folder, target)
+
+
+def _render_field_day(plan, opportunity, report, folder: str, target: _dt.date) -> None:
+    """Print one field-day plan: route, totals, launch sites, what did not fit."""
+    typer.echo(
+        f"Field day {target.isoformat()} ({target.strftime('%A')}) — folder {folder}"
+    )
+    if opportunity is not None:
+        hours = ", ".join(opportunity.best_hours)
+        typer.echo(
+            f"Day score {opportunity.score:.2f}"
+            + (f"   best hours {hours}" if hours else "   no usable hours")
+        )
+
+    if not plan.jobs:
+        typer.echo("\nNothing can be flown on this date.")
+        _print_lines(plan.warnings, "⚠")
+        _print_lines(report.notices, "\nℹ")
+        return
+
+    typer.echo(f"\nRoute ({plan.order_source}):")
+    for job in plan.jobs:
+        time_text = (
+            f"{job.flight_time_min:.0f} min"
+            if job.flight_time_min is not None
+            else "time unknown"
+        )
+        typer.echo(
+            f"  {job.route_index}. {job.name:<24} {time_text:>14}  "
+            f"{job.battery_count or '?'} battery  "
+            f"[{', '.join(job.campaign_labels)}]"
+        )
+
+    typer.echo(
+        f"\nTotal: {plan.total_flight_time_h:.1f} h flying, "
+        f"{plan.total_battery_count} batteries, {len(plan.jobs)} parcel(s) "
+        f"(budget {plan.max_field_day_hours:.1f} h)"
+    )
+    _render_launch_sites(plan)
+    _render_deferred(plan)
+    _print_lines(plan.notices, "·")
+    _print_lines(plan.warnings, "⚠")
+    _print_lines(report.notices, "\nℹ")
+
+
+def _render_launch_sites(plan) -> None:
+    if not plan.launch_sites:
+        return
+    typer.echo(f"Launch sites: {len(plan.launch_sites)}")
+    for site in plan.launch_sites:
+        typer.echo(
+            f"  site {site['index']}: {len(site['job_paths'])} parcel(s), "
+            f"radius {site['radius_m']:.0f} m"
+        )
+
+
+def _render_deferred(plan) -> None:
+    if not plan.deferred:
+        return
+    typer.echo(f"\nDeferred ({len(plan.deferred)}) — did not fit the day:")
+    for job in plan.deferred:
+        closing = (
+            f", closes in {job.days_to_close} d"
+            if job.days_to_close is not None
+            else ""
+        )
+        typer.echo(f"  {job.name:<24} [{job.priority}{closing}]")
+
+
+@season_app.command("export")
+def export_cmd(
+    folder: str = _FOLDER_OPT,
+    ics_path: Path = typer.Option(
+        ..., "--ics", help="Write the calendar to this path."
+    ),
+    season: Optional[int] = _SEASON_OPT,
+    config_path: str = _CONFIG_OPT,
+) -> None:
+    """Export the season's windows as an iCalendar file.
+
+    Windows become all-day events spanning earliest→latest — the window is the
+    truth; the target date and its uncertainty go in the description rather
+    than being claimed as an appointment.
+
+      flightmanager season export --folder hiilisyke-2027 --ics season.ics
+    """
+    host, _, tables = _context(config_path)
+    year = _year(season)
+    plan = _load_plan_or_fail(host, folder, year)
+
+    calendar = ics.build_calendar(plan, tables)
+    try:
+        ics_path.write_text(calendar, encoding="utf-8", newline="")
+    except OSError as exc:
+        _fail(exc)
+
+    typer.echo(
+        f"Wrote {ics.event_count(calendar)} window(s) for season {year} to {ics_path}"
+    )
+    if tables.uncalibrated_crops:
+        typer.echo(
+            "⚠ Events carry an UNCALIBRATED note in their description — the "
+            "dates are approximate and will move as the season progresses. "
+            "Re-export after each `season plan`."
+        )

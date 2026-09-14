@@ -30,6 +30,7 @@ import json
 import logging
 import math
 import time
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
@@ -317,6 +318,180 @@ def fetch_forecast_means(
     if pairs:
         _write_cache(path, {"days": pairs, "lat": lat, "lon": lon})
     return (pairs, False)
+
+
+# ---------------------------------------------------------------------------
+# Hourly conditions — what day-level scoring cannot answer
+# ---------------------------------------------------------------------------
+
+#: Hourly fields Open-Meteo is asked for.  The host's forecast client caches
+#: only *daily* aggregates plus hourly cloud, so per-hour wind and precipitation
+#: have to come from somewhere; this is that somewhere.  The expensive half of
+#: the forecast — MGRS tiles and orbit propagation for satellite passes — is
+#: still the host's ``build_forecast``, which this module consumes rather than
+#: reimplements (spec §7.1).
+_HOURLY_FIELDS = (
+    "temperature_2m,wind_speed_10m,wind_gusts_10m,cloud_cover,precipitation"
+)
+
+
+@dataclass(frozen=True)
+class HourSample:
+    """Conditions in one local hour."""
+
+    hour_key: str  # "YYYY-MM-DDTHH", local
+    temp_c: float | None = None
+    wind_ms: float | None = None
+    gust_ms: float | None = None
+    cloud_pct: float | None = None
+    precip_mm: float | None = None
+
+
+@dataclass
+class HourlyWeather:
+    """Hour-resolution conditions for one grid cell, keyed by local hour."""
+
+    by_hour: dict[str, HourSample] = field(default_factory=dict)
+    utc_offset_s: int = 0
+    stale: bool = False
+
+    def on(self, day: _dt.date, hour: int) -> HourSample | None:
+        return self.by_hour.get(f"{day.isoformat()}T{hour:02d}")
+
+    def day_hours(self, day: _dt.date) -> dict[int, HourSample]:
+        prefix = f"{day.isoformat()}T"
+        return {
+            int(k[11:13]): v for k, v in self.by_hour.items() if k.startswith(prefix)
+        }
+
+    def covers(self, day: _dt.date) -> bool:
+        return bool(self.day_hours(day))
+
+
+def fetch_hourly(
+    lat: float,
+    lon: float,
+    cfg: SeasonConfig,
+    cache_dir: str | Path,
+    *,
+    forecast_url: str = "https://api.open-meteo.com/v1/forecast",
+    ttl_hours: float = 3.0,
+    session: requests.Session | None = None,
+) -> HourlyWeather:
+    """Per-hour wind, gusts, cloud and precipitation over the forecast horizon.
+
+    Shares the host's forecast TTL, because this is the same forecast at a
+    finer grain and goes stale at the same rate.  Returns whatever the cache
+    holds — flagged ``stale`` — when the network is unavailable, so scoring
+    degrades to "here is what we last knew" instead of failing.
+    """
+    lat, lon = round(lat, 2), round(lon, 2)
+    path = _cache_path(cache_dir, "hourly", f"{lat}_{lon}")
+    cached = _read_cache(path, ttl_hours / 24.0)
+    if cached is not None and not cached.get("_stale"):
+        return _hourly_from_cache(cached)
+
+    if cfg.offline:
+        return (
+            _hourly_from_cache(cached, stale=True)
+            if cached is not None
+            else HourlyWeather(stale=True)
+        )
+
+    params = {
+        "latitude": lat,
+        "longitude": lon,
+        "hourly": _HOURLY_FIELDS,
+        "wind_speed_unit": "ms",
+        "timezone": "auto",
+        "forecast_days": cfg.forecast_horizon_days,
+    }
+    try:
+        log.info("Fetching Open-Meteo hourly conditions for %s,%s", lat, lon)
+        data = _get_json(forecast_url, params, cfg.timeout_s, session)
+    except Exception as exc:
+        log.error("Open-Meteo hourly fetch failed: %s", exc)
+        return (
+            _hourly_from_cache(cached, stale=True)
+            if cached is not None
+            else HourlyWeather(stale=True)
+        )
+
+    parsed = _parse_hourly(data)
+    if parsed.by_hour:
+        _write_cache(
+            path,
+            {
+                "utc_offset_s": parsed.utc_offset_s,
+                "hours": {k: _sample_dict(v) for k, v in parsed.by_hour.items()},
+            },
+        )
+    return parsed
+
+
+def _sample_dict(s: HourSample) -> dict[str, Any]:
+    return {
+        "t": s.temp_c,
+        "w": s.wind_ms,
+        "g": s.gust_ms,
+        "c": s.cloud_pct,
+        "p": s.precip_mm,
+    }
+
+
+def _hourly_from_cache(raw: dict[str, Any], stale: bool = False) -> HourlyWeather:
+    hours = {
+        key: HourSample(
+            hour_key=key,
+            temp_c=v.get("t"),
+            wind_ms=v.get("w"),
+            gust_ms=v.get("g"),
+            cloud_pct=v.get("c"),
+            precip_mm=v.get("p"),
+        )
+        for key, v in (raw.get("hours") or {}).items()
+    }
+    return HourlyWeather(
+        by_hour=hours,
+        utc_offset_s=int(raw.get("utc_offset_s", 0)),
+        stale=stale or bool(raw.get("_stale")),
+    )
+
+
+def _parse_hourly(data: dict) -> HourlyWeather:
+    """Open-Meteo's column-per-field hourly block → one sample per local hour."""
+    hourly = data.get("hourly") or {}
+    times = hourly.get("time") or []
+
+    def column(name: str) -> list:
+        return hourly.get(name) or [None] * len(times)
+
+    series = {
+        "t": column("temperature_2m"),
+        "w": column("wind_speed_10m"),
+        "g": column("wind_gusts_10m"),
+        "c": column("cloud_cover"),
+        "p": column("precipitation"),
+    }
+    out: dict[str, HourSample] = {}
+    for i, stamp in enumerate(times):
+        key = stamp[:13]  # "YYYY-MM-DDTHH", already local (timezone=auto)
+        out[key] = HourSample(
+            hour_key=key,
+            temp_c=_at(series["t"], i),
+            wind_ms=_at(series["w"], i),
+            gust_ms=_at(series["g"], i),
+            cloud_pct=_at(series["c"], i),
+            precip_mm=_at(series["p"], i),
+        )
+    return HourlyWeather(
+        by_hour=out, utc_offset_s=int(data.get("utc_offset_seconds", 0))
+    )
+
+
+def _at(column: list, i: int) -> float | None:
+    value = column[i] if i < len(column) else None
+    return float(value) if value is not None else None
 
 
 # ---------------------------------------------------------------------------

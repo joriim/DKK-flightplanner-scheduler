@@ -17,14 +17,29 @@
 enabled = true
 default_crop = "spring_barley"
 
-# ── Scheduling (consumed from Phase 2 onward; carried now so the schema is
-#    stable and a later release does not force a second settings migration) ───
+# ── Scheduling ──────────────────────────────────────────────────────────────
+# Flying hours one operator will take on in a day. `season day` fits parcels
+# into this and defers the rest by campaign priority, then by how soon each
+# window closes — it never silently drops any.
 max_field_day_hours = 6.0
-# Solar elevation floors. At 62.8 °N this is a real constraint for radiometric
-# work: multispectral needs the sun higher than structural RGB does, and in late
-# October an autumn catch-crop flight may have no qualifying hours at all.
+
+# Solar elevation floors — a HARD GATE, not a scoring penalty. Multispectral
+# and thermal work is radiometric and needs the sun high; RGB-only structural
+# work (stand counts, lodging extent) tolerates a lower sun and gets the looser
+# floor.
+#
+# ⚠ At Seinäjoki (62.8 °N) these floors bound the season more tightly than the
+#   weather does. Maximum solar elevation is 90 − latitude + declination, so:
+#     30° floor (multispectral)  → usable only ~28 Mar – 15 Sep
+#     20° floor (RGB structural) → usable only ~2 Mar – 11 Oct
+#   An autumn catch-crop flight in multispectral is therefore impossible at this
+#   latitude however good the forecast looks, and `season next` says so outright
+#   rather than returning a low score. Lower the floor only if you know the
+#   radiometry tolerates it.
 min_solar_elevation_deg = 30.0
 min_solar_elevation_rgb_deg = 20.0
+
+# Precipitation above this (mm over the daytime window) zeroes a day outright.
 precip_threshold_mm = 0.5
 
 # ── Phenology and the uncertainty band ──────────────────────────────────────
@@ -66,8 +81,15 @@ offline = false
 low_altitude_warn_m = 25.0
 min_altitude_m = 10.0
 
-# Opportunity-scoring weights (Phase 2). Components are all in [0, 1]; hard
-# gates zero the score outright regardless of these.
+# Opportunity-scoring weights. Components are all in [0, 1]; the weighted sum is
+# normalised, so these are relative, not absolute — doubling every weight changes
+# nothing. HARD GATES zero the score outright regardless of these: outside the
+# window, wind above `weather.drone_wind_limit_ms`, rain above the threshold
+# above, no hour clearing the solar floor, or `flight_ready: false` on the job.
+#
+# `satellite_coincidence` is dropped from the normalisation for campaigns whose
+# `satellite_coincidence = "ignored"`, so an emergence count is not capped for
+# failing to coincide with a pass it never wanted.
 [season.weights]
 days_from_target = 0.25
 wind = 0.20
@@ -140,3 +162,21 @@ satellite_coincidence = 0.10
 # mode = "cadence"           # "cadence" (every_days) | "thermal" (every_gdd)
 # every_days = 10
 # max_count = 3
+
+# ─────────────────────────────────────────────────────────────────────────────
+#  Settings this module READS from the host rather than duplicating
+# ─────────────────────────────────────────────────────────────────────────────
+#
+#  [weather].drone_wind_limit_ms   the hard wind gate for a flyable day
+#  [weather].daytime_start_h/_end_h  which hours count as "day" — one notion of
+#                                  day across the forecast bar and the season
+#                                  scoring, never two
+#  [weather].open_meteo_url        the forecast endpoint (hourly conditions are
+#                                  fetched from whatever the host is set to)
+#  [weather].cache_max_age_hours   the forecast TTL, shared by the hourly fetch
+#  [satellites].*                  MGRS tiles and orbit propagation for the
+#                                  clear-sky passes that drive coincidence
+#  [flight].max_height_agl_m       the ceiling GSD-derived altitudes clamp to
+#
+#  Change them there, not here. If `drone_wind_limit_ms` is unset the season
+#  module gates on a conservative 10 m/s and flags every day it scored that way.

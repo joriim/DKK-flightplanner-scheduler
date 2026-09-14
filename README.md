@@ -30,7 +30,7 @@ Upcoming (33)
 
 > **Development note — AI-assisted ("vibe coded").** Like the host project, this
 > module was built largely through iterative prompting of an LLM coding agent
-> rather than line-by-line hand authoring. It has a real test suite (268 tests),
+> rather than line-by-line hand authoring. It has a real test suite (501 tests),
 > but it has not had a line-by-line human agronomic or security audit. **The
 > stage thresholds it ships are explicitly placeholders** — see
 > [Uncertainty is the feature](#uncertainty-is-the-feature).
@@ -39,16 +39,23 @@ Upcoming (33)
 
 ## Status
 
-**Phase 1 of four.** What ships: the phenology engine, the campaign library, the
-plan store, and the `init` / `plan` / `status` surfaces on CLI, REST and MCP.
+**Phases 1 and 2 of four.**
 
-What does not ship yet: day-level opportunity scoring, solar elevation,
-satellite coincidence, cross-parcel batching, the Season UI, and the calibration
-loop. Those are Phases 2–4 and are **absent rather than stubbed** — a command
+- **Phase 1 — windows.** Phenology engine, campaign library, plan store,
+  `init` / `plan` / `status`. *"The emergence window for these 12 parcels opens
+  24–31 May."*
+- **Phase 2 — scheduling.** Solar elevation, opportunity scoring, cross-parcel
+  batching, `next` / `day` / `export`. *"Fly Thursday, these 7 parcels, in this
+  order, 2 batteries."*
+
+What does not ship yet: the Season UI and Gantt, `campaign_apply` /
+`campaign_log`, the calibration loop, the season PDF, and the S2 pixel-snap
+helper. Those are Phases 3–4 and are **absent rather than stubbed** — a command
 that answers "not implemented" is worse than one that is not in `--help`.
 
 Design decisions, the host assumptions this rests on, and what is deliberately
-refused are written up in [`docs/phase-1-assumptions.md`](docs/phase-1-assumptions.md).
+refused: [`docs/phase-1-assumptions.md`](docs/phase-1-assumptions.md) and
+[`docs/phase-2-notes.md`](docs/phase-2-notes.md).
 
 ---
 
@@ -60,7 +67,7 @@ The module lives at the path it will occupy in the host:
 src/flightmanager/season/     ← drops straight into the host's package
 tests/season/
 config.season.example.toml    ← append to your config.toml
-docs/phase-1-assumptions.md
+docs/
 ```
 
 There is deliberately **no `src/flightmanager/__init__.py`**, so `flightmanager`
@@ -72,7 +79,7 @@ tests standalone:
 
 ```bash
 python -m venv .venv && .venv/bin/pip install -e . && .venv/bin/pip install pytest responses
-.venv/bin/python -m pytest tests/season -q      # 268 passed
+.venv/bin/python -m pytest tests/season -q      # 501 passed
 ```
 
 ### Installing into the host
@@ -177,6 +184,76 @@ two failure modes, which are asymmetric:
 Clamping *down* to the ceiling is neither — a coarse requirement met from a
 lower altitude simply yields finer imagery than asked for.
 
+### Picking the day
+
+Phase 1 answers "which week". Phase 2 answers "which day, and can I fit them
+all into one trip".
+
+Every candidate day is scored per campaign, and **hard gates zero the score
+outright** — outside the window, wind above the drone's limit, rain above
+threshold, no hour clearing the solar floor, or `flight_ready: false` on the
+job. A weighted sum alone would let a good cloud score paper over unflyable
+wind, so gates come first and each one is reported by name. The remaining
+components — proximity to the campaign's target date, wind, cloud,
+precipitation, usable sunlit hours, satellite coincidence — are weighted from
+config and **always shown**, because operators need to see why Thursday beat
+Tuesday.
+
+A day's headline score is its **best** campaign, not the average: a day is worth
+flying because something on it scores well. Ties break on how much else the day
+clears.
+
+### Solar elevation is the binding constraint here
+
+At 62.8 °N the sun, not the weather, bounds half the season. Maximum elevation
+at solar noon is `90 − latitude + declination`, which at Seinäjoki gives 50.6°
+at midsummer, **27.2° at the equinox** and 3.8° at midwinter. Against the
+configured floors:
+
+| Floor | Usable at Seinäjoki | Days |
+|---|---|---|
+| 30° — multispectral, thermal | 28 Mar – 15 Sep | 171 |
+| 20° — RGB structural | 2 Mar – 11 Oct | 223 |
+
+So multispectral work stops in **mid-September**, six weeks before the spec's
+"late October" estimate — and the shipped `catch_crop_biomass` campaign, which
+is multispectral and fires 35 days after establishment, targets straight into
+that dead zone. Rather than return a low score and leave the operator
+refreshing the forecast, the module says so:
+
+```
+ℹ Nothing is flyable in this horizon because the sun never clears the elevation
+  floor. At 62.8°N the sun clears 30° only between 2026-03-28 and 2026-09-15;
+  RGB-only work at 20° has a wider season. This is a latitude limit, not a
+  weather one — no forecast will change it.
+```
+
+What to do about it is an agronomic call, so the campaign library was left
+alone. See [`docs/phase-2-notes.md`](docs/phase-2-notes.md).
+
+### The field day
+
+`season day` groups the campaigns a date serves into parcels, orders them,
+and checks the total against `max_field_day_hours`.
+
+**The operator's own route order wins.** If the folder's jobs carry
+`sort_order` — someone dragged them into sequence knowing where the gates and
+the soft ground are — that is the route. Greedy nearest-neighbour is only the
+fallback for an unrouted folder, and it is a port of the browser UI's own
+`greedyTSP` so the two never disagree. `order_source` says which was used.
+
+Overflow is never silently trimmed: parcels that do not fit are deferred by
+campaign priority and then by how soon each window closes, and listed with the
+reason. The budget is filled first-fit, so a large urgent parcel can be skipped
+while smaller ones fit around it — that packs more flying into the day, but the
+plan names what was passed over and what to do:
+
+```
+⚠ 5241087471 (closes in 3 d) was deferred although it outranks 5241087472:
+  it needs 140 min and did not fit the remaining budget. Consider raising
+  --max-hours, splitting it, or flying it first.
+```
+
 ---
 
 ## What this module does not do
@@ -218,6 +295,16 @@ flightmanager season plan   --folder hiilisyke-2027
 flightmanager season status --folder hiilisyke-2027
 flightmanager season status --folder hiilisyke-2026 --season 2026 --missed
 
+# Rank the coming days, with the component breakdown behind each score.
+flightmanager season next   --folder hiilisyke-2027 --days 10
+
+# Turn "fly Thursday" into parcels, route order and batteries.
+flightmanager season day    --folder hiilisyke-2027 --date 2027-06-04
+flightmanager season day    --folder hiilisyke-2027 --date 2027-06-04 --max-hours 4
+
+# Put the windows in the calendar the operator already lives in.
+flightmanager season export --folder hiilisyke-2027 --ics season.ics
+
 # Inspect the libraries and one campaign's reasoning.
 flightmanager season crops
 flightmanager season campaigns
@@ -240,20 +327,29 @@ POST   /api/season/{folder}/plan           → recompute windows
 GET    /api/season/{folder}/status         → open / closing / missed
 GET    /api/season/-/crops                 → crop profiles and their provenance
 GET    /api/season/-/campaign-types        → the campaign library
+GET    /api/season/{folder}/opportunities  → scored candidate days, best first
+GET    /api/season/{folder}/day/{date}     → field-day plan, route order, sites
+GET    /api/season/{folder}/ics            → the windows as a calendar file
 ```
 
 No SSE — these are fast, and they do not take the pipeline lock.
 
 ### MCP
 
-Read tools: `season_status`, `campaign_detail`, `crop_profiles`. These queries
-work end to end today:
+Read tools: `season_status`, `campaign_detail`, `crop_profiles`,
+`season_opportunities`, `season_day_plan`. These queries work end to end today:
 
 ```
 When does the emergence window open for folder hiilisyke-2027?
 Which parcels have a window closing in the next 5 days?
+Give me the best flying day next week for the N-topdress campaigns,
+  and the route order.
 Which windows did we miss last season, and why?
 ```
+
+The scheduling tools are documented so an assistant cannot quote a bare number:
+a zero means a named hard gate fired, not "a poor day", and the payload says
+which.
 
 ---
 

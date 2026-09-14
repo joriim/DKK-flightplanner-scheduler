@@ -66,6 +66,15 @@ class HostContext(Protocol):
     @property
     def forecast_ttl_hours(self) -> float: ...
 
+    @property
+    def drone_wind_limit_ms(self) -> float | None: ...
+
+    @property
+    def daytime_start_h(self) -> int: ...
+
+    @property
+    def daytime_end_h(self) -> int: ...
+
     def folder_dir(self, folder: str) -> Path: ...
 
     def jobs_in_folder(self, folder: str) -> list[JobRef]: ...
@@ -75,6 +84,12 @@ class HostContext(Protocol):
     def active_drone(self) -> Any | None: ...
 
     def raw_config(self) -> dict[str, Any]: ...
+
+    def job_cards(self, folder: str) -> list[dict[str, Any]]: ...
+
+    def day_slots(self, folder: str) -> list[dict[str, Any]]: ...
+
+    def cluster_launch_sites(self, cards: list[dict[str, Any]]) -> list[Any]: ...
 
 
 # ---------------------------------------------------------------------------
@@ -115,6 +130,21 @@ class FlightmanagerHost:
     @property
     def forecast_ttl_hours(self) -> float:
         return float(self.config.weather.cache_max_age_hours)
+
+    @property
+    def drone_wind_limit_ms(self) -> float | None:
+        """The host's flyability ceiling. ``None`` means the host has none set."""
+        limit = self.config.weather.drone_wind_limit_ms
+        return float(limit) if limit is not None else None
+
+    @property
+    def daytime_start_h(self) -> int:
+        """Start of the host's daytime window — one notion of "day" throughout."""
+        return int(self.config.weather.daytime_start_h)
+
+    @property
+    def daytime_end_h(self) -> int:
+        return int(self.config.weather.daytime_end_h)
 
     def folder_dir(self, folder: str) -> Path:
         """Resolve a folder name through the host's own traversal guard.
@@ -168,6 +198,55 @@ class FlightmanagerHost:
             return self.config.active_drone()
         except Exception:
             return None
+
+    def job_cards(self, folder: str) -> list[dict[str, Any]]:
+        """Full job cards for *folder*, with geometry.
+
+        Carries what the field-day planner needs and the season plan
+        deliberately does not store: takeoff point, survey polygon, flight
+        order, estimated flight time, battery count and ``flight_ready``.
+        """
+        from flightmanager.storage.job_store import scan_jobs
+
+        for group in scan_jobs(self.output_dir, with_polygon=True):
+            if group.get("name") == folder:
+                return list(group.get("jobs", []))
+        return []
+
+    def day_slots(self, folder: str) -> list[dict[str, Any]]:
+        """The host's own satellite + weather day slots for this folder.
+
+        Consumes ``build_forecast`` rather than reimplementing it (spec §7.1):
+        the MGRS tile lookup, CelesTrak orbit propagation, clear-sky pass
+        qualification and the "golden day" concept all already exist and are
+        expensive to recompute. Returns an empty list when the forecast cannot
+        be built — satellite coincidence then simply scores zero rather than
+        failing the whole ranking.
+        """
+        from flightmanager.forecasting.forecast import build_forecast
+        from flightmanager.storage.job_store import job_centroids, resolve_folder_dir
+
+        centroids = job_centroids(self.output_dir, folder=folder)
+        if not centroids:
+            return []
+        try:
+            payload = build_forecast(
+                centroids,
+                self.config.satellites,
+                self.config.weather,
+                self.cache_dir,
+                folder_dir=resolve_folder_dir(self.output_dir, folder),
+            )
+        except Exception as exc:
+            log.warning("Could not build forecast for %s: %s", folder, exc)
+            return []
+        return list(payload.get("days", []))
+
+    def cluster_launch_sites(self, cards: list[dict[str, Any]]) -> list[Any]:
+        """Group jobs into launch sites using the host's own clustering."""
+        from flightmanager.forecasting.launch_sites import cluster_jobs
+
+        return list(cluster_jobs(cards))
 
     def raw_config(self) -> dict[str, Any]:
         """The parsed ``config.toml`` document, for the ``[[crops]]`` tables.

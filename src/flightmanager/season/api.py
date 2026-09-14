@@ -22,7 +22,9 @@ from typing import Any
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel, Field
 
-from flightmanager.season import store
+from fastapi.responses import Response
+
+from flightmanager.season import ics, opportunities, store
 from flightmanager.season.config import load_season_config, load_season_tables
 from flightmanager.season.integration import FlightmanagerHost
 from flightmanager.season.models import JobAssignment
@@ -220,6 +222,142 @@ async def get_status(
     if plan is None:
         raise HTTPException(404, f"no season plan for {folder} / {year}")
     return _status_payload(status(plan, tables, audience=audience))
+
+
+@router.get("/{folder}/opportunities")
+async def get_opportunities(
+    folder: str,
+    days: int = 14,
+    season: int | None = None,
+    audience: str | None = None,
+    include_unflyable: bool = False,
+) -> dict[str, Any]:
+    """Scored candidate days, best first.
+
+    Fast enough to serve inline (no SSE): the expensive parts — orbit
+    propagation and the MGRS grid — are the host forecast's own disk-cached
+    work, and the solar ephemeris is arithmetic.
+    """
+    host = _host()
+    cfg, tables = _tables_and_cfg(host)
+    report = _guard(
+        opportunities.find_opportunities,
+        host,
+        tables,
+        cfg,
+        folder,
+        _year(season),
+        days=max(1, min(days, 30)),
+        audience=audience,
+    )
+    rows = report.opportunities if include_unflyable else report.flyable()
+    return {
+        "folder": report.folder,
+        "season": report.season,
+        "today": report.today.isoformat(),
+        "campaigns_considered": report.campaigns_considered,
+        "weather_stale": report.weather_stale,
+        "opportunities": [o.model_dump(mode="json") for o in rows],
+        "best": report.best().model_dump(mode="json") if report.best() else None,
+        "warnings": report.warnings,
+        "notices": report.notices,
+    }
+
+
+@router.get("/{folder}/day/{date}")
+async def get_day(
+    folder: str,
+    date: str,
+    season: int | None = None,
+    audience: str | None = None,
+    max_hours: float | None = None,
+) -> dict[str, Any]:
+    """The field-day plan for one date: jobs in route order, batteries, sites.
+
+    The payload is shaped to feed the existing route/export flow straight back:
+    ``job_paths`` is the flight sequence the reorder endpoint accepts.
+    """
+    host = _host()
+    cfg, tables = _tables_and_cfg(host)
+    try:
+        target = _dt.date.fromisoformat(date)
+    except ValueError as exc:
+        raise HTTPException(400, f"{date!r} is not an ISO date") from exc
+
+    plan, opportunity, report = _guard(
+        opportunities.field_day,
+        host,
+        tables,
+        cfg,
+        folder,
+        _year(season),
+        target,
+        audience=audience,
+        max_hours=max_hours,
+    )
+    return {
+        "date": target.isoformat(),
+        "folder": folder,
+        "order_source": plan.order_source,
+        "job_paths": plan.job_paths,
+        "jobs": [
+            {
+                "job_path": j.job_path,
+                "name": j.name,
+                "route_index": j.route_index,
+                "flight_time_min": j.flight_time_min,
+                "battery_count": j.battery_count,
+                "flight_ready": j.flight_ready,
+                "priority": j.priority,
+                "days_to_close": j.days_to_close,
+                "takeoff_4326": j.takeoff_4326,
+                "campaigns": [c.model_dump(mode="json") for c in j.campaigns],
+            }
+            for j in plan.jobs
+        ],
+        "deferred": [
+            {
+                "job_path": j.job_path,
+                "name": j.name,
+                "priority": j.priority,
+                "days_to_close": j.days_to_close,
+                "campaigns": [c.model_dump(mode="json") for c in j.campaigns],
+            }
+            for j in plan.deferred
+        ],
+        "launch_sites": plan.launch_sites,
+        "total_flight_time_min": plan.total_flight_time_min,
+        "total_flight_time_h": plan.total_flight_time_h,
+        "total_battery_count": plan.total_battery_count,
+        "max_field_day_hours": plan.max_field_day_hours,
+        "overflows": plan.overflows,
+        "best_hours": plan.best_hours,
+        "opportunity": opportunity.model_dump(mode="json") if opportunity else None,
+        "warnings": plan.warnings,
+        "notices": plan.notices + report.notices,
+    }
+
+
+@router.get("/{folder}/ics")
+async def get_ics(folder: str, season: int | None = None) -> Response:
+    """The season's windows as a downloadable iCalendar file."""
+    host = _host()
+    _, tables = _tables_and_cfg(host)
+    year = _year(season)
+    plan = _guard(store.load_plan, _guard(host.folder_dir, folder), year)
+    if plan is None:
+        raise HTTPException(404, f"no season plan for {folder} / {year}")
+
+    calendar = ics.build_calendar(plan, tables)
+    return Response(
+        content=calendar,
+        media_type="text/calendar; charset=utf-8",
+        headers={
+            "Content-Disposition": (
+                f'attachment; filename="season_{folder}_{year}.ics"'
+            )
+        },
+    )
 
 
 @router.get("/-/crops")

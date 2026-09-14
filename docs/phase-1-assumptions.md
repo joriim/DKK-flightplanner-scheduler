@@ -92,6 +92,11 @@ existing note that FMI is a planned alternative.
 
 ## 4. Deliberately not built in Phase 1
 
+> **Superseded in part.** Phase 2 has since built the scheduling half of this
+> list — solar elevation, scoring, `season next` / `day`, batching and ICS
+> export. See [`phase-2-notes.md`](phase-2-notes.md), which also records two
+> further spec assumptions that did not hold. The rest below still stands.
+
 Appendix D says Phase 1 only, and these are absent rather than stubbed — a
 command that answers "not implemented" is worse than one that is not in
 `--help`.
