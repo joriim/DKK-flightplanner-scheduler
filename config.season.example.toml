@@ -1,0 +1,142 @@
+# ─────────────────────────────────────────────────────────────────────────────
+#  Season planning — kasvukauden kuvaussuunnittelu
+#
+#  Append this to your config.toml.  Every value here is optional: the module
+#  ships working defaults, and the crop and campaign libraries are built in.
+#
+#  ⚠ THE REPLACE RULE, same as [[drones]]:
+#     Define ANY [[crops]] entry and it REPLACES the whole built-in crop list.
+#     Define ANY [[campaigns]] entry and it REPLACES the whole built-in library.
+#     There is no per-entry merge.  `flightmanager season crops` prints which
+#     list is actually in use, and every surface warns when yours has taken over.
+#     To tweak one crop, copy the whole built-in table first — you will find it
+#     in src/flightmanager/season/season_defaults.toml.
+# ─────────────────────────────────────────────────────────────────────────────
+
+[season]
+enabled = true
+default_crop = "spring_barley"
+
+# ── Scheduling (consumed from Phase 2 onward; carried now so the schema is
+#    stable and a later release does not force a second settings migration) ───
+max_field_day_hours = 6.0
+# Solar elevation floors. At 62.8 °N this is a real constraint for radiometric
+# work: multispectral needs the sun higher than structural RGB does, and in late
+# October an autumn catch-crop flight may have no qualifying hours at all.
+min_solar_elevation_deg = 30.0
+min_solar_elevation_rgb_deg = 20.0
+precip_threshold_mm = 0.5
+
+# ── Phenology and the uncertainty band ──────────────────────────────────────
+# Years of archive averaged into the daily climatological normal used beyond
+# the forecast horizon.
+projection_normal_years = 30
+# How much the window band widens per week of projection past the horizon.
+window_uncertainty_days_per_week_projected = 1.5
+# Floor on the band even inside the forecast horizon: the stage thresholds are
+# themselves uncertain, so a future window is never truly ±0.
+base_uncertainty_days = 2.0
+# Extra band while the crop table is still uncalibrated. This is what produces
+# the "±7 d, uncalibrated" line. Calibrate the tables and it goes away.
+uncalibrated_extra_days = 5.0
+
+# ── Weather history ─────────────────────────────────────────────────────────
+# Open-Meteo historical archive. Separate from [weather].open_meteo_url — the
+# forecast and archive are different hosts.
+archive_url = "https://archive-api.open-meteo.com/v1/archive"
+# A past day's weather is immutable, so history gets a long TTL of its own
+# rather than the 3 h forecast TTL from [weather].cache_max_age_hours.
+history_ttl_days = 120
+normals_ttl_days = 365
+# The archive lags real time by a few days; newer days fall back to the forecast.
+archive_lag_days = 6
+# How far the forecast counts as real information. Beyond this the normal takes
+# over and the band starts widening.
+forecast_horizon_days = 14
+# One weather cell per folder. A folder wider than this warns that thermal time
+# is being computed at a single point.
+max_folder_span_km = 30.0
+timeout_s = 30
+# Serve from cache only and report staleness instead of failing.
+offline = false
+
+# ── Flight-parameter derivation from a campaign's GSD requirement ────────────
+# Below this AGL a campaign is flagged `low_altitude_workload`: narrow strips,
+# more lines, less coverage per battery, more obstacle exposure.
+low_altitude_warn_m = 25.0
+min_altitude_m = 10.0
+
+# Opportunity-scoring weights (Phase 2). Components are all in [0, 1]; hard
+# gates zero the score outright regardless of these.
+[season.weights]
+days_from_target = 0.25
+wind = 0.20
+cloud = 0.20
+sun_elevation = 0.15
+precip = 0.10
+satellite_coincidence = 0.10
+
+# ─────────────────────────────────────────────────────────────────────────────
+#  [[crops]] and [[campaigns]] — uncomment to REPLACE the built-in libraries.
+#
+#  The built-ins cover spring barley, spring wheat, oats, spring rape and a
+#  catch-crop mix, plus the twelve campaign types. Their stage thresholds are
+#  PLACEHOLDERS shipped with confidence = "low"; replace them through the
+#  calibration workflow rather than by hand-guessing.
+# ─────────────────────────────────────────────────────────────────────────────
+
+# [[crops]]
+# id = "spring_barley"
+# label_fi = "Ohra (kevät)"
+# label_en = "Spring barley"
+# base_temp_c = 5.0          # Finnish tehoisa lämpösumma convention
+# cutoff_temp_c = 30.0
+# model = "gdd"              # "gdd" | "fixed_days" | "manual"
+#
+# [crops.stages]             # accumulated effective °C·d from sowing
+# sowing         = 0
+# emergence      = 130
+# tillering      = 260
+# stem_elong     = 400
+# flag_leaf      = 560
+# heading        = 650
+# anthesis       = 720
+# grain_fill_mid = 900
+# yellow_ripe    = 1050
+# harvest_ready  = 1150
+#
+# [crops.provenance]         # required — every threshold declares its source
+# source = "Luke variety trials + own BBCH observations 2026-2028"
+# confidence = "medium"      # "low" until it has actually been calibrated
+# calibrated_from = ["obs-2026-001", "obs-2027-014"]
+# n = 42
+# residual_spread_cd = 45.0
+
+# [[campaigns]]
+# id = "emergence_count"
+# label_fi = "Orastumisen tiheyslaskenta"
+# label_en = "Emergence / stand count"
+# purpose = "Stand density, gap mapping, resow or patch decision"
+# decision_supported = "resow / patch-drill / revise N plan"
+# trigger_type = "stage"     # "stage" | "cadence" | "weather_event"
+# trigger_stage = "emergence"
+# offset_days = 7
+# window_before_days = 3
+# window_after_days = 10
+# hard_deadline_stage = "tillering"
+# required_gsd_cm = 0.6      # drives altitude via the drone profile
+# sensor = "rgb"             # "rgb" | "multispectral" | "both" | "thermal"
+# overlap_front = 0.80
+# overlap_side = 0.75
+# priority = "high"          # high | normal | opportunistic
+# weather_sensitivity = "high"
+# satellite_coincidence = "ignored"   # required | preferred | ignored
+# audience = "farmer"        # farmer | researcher | both
+# drone_spray_related = false         # true adds the ground-sprayer notice
+# notes_fi = "Lennätetään ennen kasvuston sulkeutumista."
+# notes_en = "Fly before canopy closure."
+#
+# [campaigns.repeat]         # only for repeatable types
+# mode = "cadence"           # "cadence" (every_days) | "thermal" (every_gdd)
+# every_days = 10
+# max_count = 3

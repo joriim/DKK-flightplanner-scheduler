@@ -1,0 +1,445 @@
+# Built-in crop profiles and campaign types for the season planning module.
+#
+# Follows the [[drones]] precedent exactly: add any [[crops]] entry to your
+# config.toml and it REPLACES this entire crop list; add any [[campaigns]]
+# entry and it REPLACES this entire campaign list.  There is no per-entry
+# merge.  This has bitten people before — see README, "Season planning".
+#
+# ⚠ EVERY STAGE THRESHOLD BELOW IS A PLACEHOLDER.
+# They are order-of-magnitude agronomic rules of thumb for Finnish conditions
+# (effective temperature sum, base +5 °C, accumulated from sowing), not values
+# from a verified source.  They ship with confidence = "low" and the module
+# renders window dates with an explicit uncertainty band because of it.  Replace
+# them through the calibration loop (`flightmanager season calibrate`), whose
+# right inputs are Luke's variety trial data and observed BBCH from this
+# project's own flights.
+
+# ═══════════════════════════════════════════════════════════════════════════
+# Crops
+# ═══════════════════════════════════════════════════════════════════════════
+#
+# `sowing = 0` is a synthetic stage present in every profile.  It is what
+# pre-sowing campaigns (bare_soil_baseline) trigger on, and it keeps every
+# campaign trigger expressible as "a stage in this crop's table" instead of
+# needing a separate pre-season code path.
+
+[[crops]]
+id = "spring_barley"
+label_fi = "Ohra (kevät)"
+label_en = "Spring barley"
+base_temp_c = 5.0
+cutoff_temp_c = 30.0
+model = "gdd"
+
+[crops.stages]
+sowing         = 0      # accumulation start
+emergence      = 130    # BBCH 10-11
+tillering      = 260    # BBCH 21-25
+stem_elong     = 400    # BBCH 30-32
+flag_leaf      = 560    # BBCH 37-39
+heading        = 650    # BBCH 51-59
+anthesis       = 720    # BBCH 61-65
+grain_fill_mid = 900    # BBCH 75
+yellow_ripe    = 1050   # BBCH 87
+harvest_ready  = 1150   # BBCH 89-92
+
+[crops.provenance]
+source = "provisional — general Finnish agronomic rules of thumb (spec Appendix B)"
+confidence = "low"
+calibrated_from = []
+
+[[crops]]
+id = "spring_wheat"
+label_fi = "Kevätvehnä"
+label_en = "Spring wheat"
+base_temp_c = 5.0
+cutoff_temp_c = 30.0
+model = "gdd"
+
+[crops.stages]
+sowing         = 0
+emergence      = 140
+tillering      = 280
+stem_elong     = 430
+flag_leaf      = 600
+heading        = 700
+anthesis       = 780
+grain_fill_mid = 960
+yellow_ripe    = 1130
+harvest_ready  = 1250
+
+[crops.provenance]
+source = "provisional — general Finnish agronomic rules of thumb (spec Appendix B)"
+confidence = "low"
+calibrated_from = []
+
+[[crops]]
+id = "oats"
+label_fi = "Kaura"
+label_en = "Oats"
+base_temp_c = 5.0
+cutoff_temp_c = 30.0
+model = "gdd"
+
+[crops.stages]
+sowing         = 0
+emergence      = 135
+tillering      = 270
+stem_elong     = 420
+flag_leaf      = 580
+heading        = 680
+anthesis       = 750
+grain_fill_mid = 940
+yellow_ripe    = 1100
+harvest_ready  = 1200
+
+[crops.provenance]
+source = "provisional — general Finnish agronomic rules of thumb (spec Appendix B)"
+confidence = "low"
+calibrated_from = []
+
+# Spring rape reaches the analogous stages at different BBCH codes: the
+# `tillering` row is rosette (BBCH 14-19), `flag_leaf` is green bud (BBCH 50)
+# and `heading` is flowering start (BBCH 60).  The keys are shared so one
+# campaign library covers cereals and rape without a second trigger vocabulary.
+[[crops]]
+id = "spring_rape"
+label_fi = "Kevätrypsi / -rapsi"
+label_en = "Spring rape"
+base_temp_c = 5.0
+cutoff_temp_c = 30.0
+model = "gdd"
+
+[crops.stages]
+sowing         = 0
+emergence      = 110    # BBCH 10-11
+tillering      = 230    # rosette, BBCH 14-19
+stem_elong     = 380    # BBCH 30-32
+flag_leaf      = 520    # green bud, BBCH 50
+heading        = 620    # flowering start, BBCH 60
+anthesis       = 700    # BBCH 61-65
+grain_fill_mid = 850    # BBCH 75
+yellow_ripe    = 1000   # BBCH 87
+harvest_ready  = 1100   # BBCH 89-92
+
+[crops.provenance]
+source = "provisional — general Finnish agronomic rules of thumb (spec Appendix B)"
+confidence = "low"
+calibrated_from = []
+
+# Catch crops accumulate from establishment, not from the main crop's sowing.
+# Set `accumulation_start` on the job assignment to the establishment date.
+# Autumn campaigns are usually limited by solar elevation and trafficability
+# long before thermal time — Phase 2 is what makes that constraint visible.
+[[crops]]
+id = "catch_crop"
+label_fi = "Kerääjäkasvi"
+label_en = "Catch crop"
+base_temp_c = 5.0
+cutoff_temp_c = 25.0
+model = "gdd"
+
+[crops.stages]
+sowing        = 0       # = establishment
+establishment = 120
+biomass_early = 300
+biomass_peak  = 550
+
+[crops.provenance]
+source = "provisional — very weak; catch-crop thermal requirements vary by species mix"
+confidence = "low"
+calibrated_from = []
+
+# ═══════════════════════════════════════════════════════════════════════════
+# Campaign types
+# ═══════════════════════════════════════════════════════════════════════════
+
+[[campaigns]]
+id = "bare_soil_baseline"
+label_fi = "Paljaan maan perustilanne"
+label_en = "Bare-soil baseline"
+purpose = "Soil zoning, sampling design, SOC proxy, drainage and wet-spot mapping"
+decision_supported = "soil sampling layout / drainage repair / zoning for the season"
+trigger_type = "stage"
+trigger_stage = "sowing"
+offset_days = -14          # ~2 weeks before sowing
+window_before_days = 7
+window_after_days = 12     # stays clear of the sowing date itself
+required_gsd_cm = 2.5
+sensor = "both"
+overlap_front = 0.80
+overlap_side = 0.70
+priority = "normal"
+weather_sensitivity = "high"
+audience = "both"
+notes_fi = "Maan on oltava kuiva ja muokattu. Salaojaviat erottuvat parhaiten n. 3 vrk kuluessa ≥25 mm sateesta."
+notes_en = "Needs dry, tilled soil. Tile-drainage faults show best within ~3 d of ≥25 mm rain."
+
+[[campaigns]]
+id = "emergence_count"
+label_fi = "Orastumisen tiheyslaskenta"
+label_en = "Emergence / stand count"
+purpose = "Stand density, gap mapping, resow or patch decision"
+decision_supported = "resow / patch-drill / revise N plan"
+trigger_type = "stage"
+trigger_stage = "emergence"
+offset_days = 7
+window_before_days = 3
+window_after_days = 10
+hard_deadline_stage = "tillering"
+required_gsd_cm = 0.6
+sensor = "rgb"
+overlap_front = 0.80
+overlap_side = 0.75
+priority = "high"
+weather_sensitivity = "high"
+audience = "farmer"
+notes_fi = "Lennätetään ennen kasvuston sulkeutumista; kohteena yksittäiset taimet."
+notes_en = "Fly before canopy closure; the target is individual seedlings. Plant-density retrieval degrades distinctly as GSD coarsens."
+
+# "Crop 2-4 leaf" has no threshold of its own in the seeded tables, so this
+# triggers off emergence with an offset.  A calibrated table should give the
+# leaf stages their own row and this trigger should move onto it.
+[[campaigns]]
+id = "weed_map_early"
+label_fi = "Rikkakasvikartoitus (varhainen)"
+label_en = "Early weed mapping"
+purpose = "Weed patch delineation while weeds are still separable from the crop"
+decision_supported = "patch-spray prescription for the GROUND sprayer"
+trigger_type = "stage"
+trigger_stage = "emergence"
+offset_days = 12           # crop roughly at the 2-4 leaf stage
+window_before_days = 2
+window_after_days = 7
+hard_deadline_stage = "tillering"
+required_gsd_cm = 0.4
+sensor = "rgb"
+overlap_front = 0.80
+overlap_side = 0.75
+priority = "high"
+weather_sensitivity = "high"
+audience = "farmer"
+drone_spray_related = true
+notes_fi = "Tuottaa kartan MAALEVITTIMELLE. UAV-kartat aliarvioivat rikkoja järjestelmällisesti (puuttumisaste 41–65 %) — pienimmät taimet jäävät resoluution alle. Lennä matalalta ja ajoissa."
+notes_en = "Produces a map for a GROUND sprayer. UAV weed maps systematically under-predict weeds (41-65 % omission) because the smallest weeds fall below image resolution. Fly low and early."
+
+[[campaigns]]
+id = "n_topdress_timing"
+label_fi = "Lisätypen ajoitus"
+label_en = "N topdress timing"
+purpose = "Canopy N status and within-field variation at the topdress decision point"
+decision_supported = "topdress N timing and rate zoning"
+trigger_type = "stage"
+trigger_stage = "stem_elong"
+offset_days = 0
+window_before_days = 5
+window_after_days = 7
+hard_deadline_stage = "flag_leaf"
+required_gsd_cm = 3.0
+sensor = "multispectral"
+overlap_front = 0.80
+overlap_side = 0.70
+priority = "high"
+weather_sensitivity = "normal"
+satellite_coincidence = "preferred"
+audience = "farmer"
+notes_fi = "Kasvuston typpitila (NNI) on hyvin dokumentoitu; sen muuntaminen levitysmääriksi ei ole."
+notes_en = "Canopy N status (NNI) from multispectral is well established; converting it to applied rates is much less so."
+
+[[campaigns]]
+id = "canopy_peak"
+label_fi = "Kasvuston huippu"
+label_en = "Peak canopy"
+purpose = "Yield-potential signal, biomass, and the reference for satellite cross-calibration"
+decision_supported = "yield expectation, biomass mapping, scale bridging"
+trigger_type = "stage"
+trigger_stage = "flag_leaf"
+offset_days = 0
+window_before_days = 5
+window_after_days = 10
+hard_deadline_stage = "anthesis"
+required_gsd_cm = 3.0
+sensor = "multispectral"
+overlap_front = 0.80
+overlap_side = 0.70
+priority = "high"
+weather_sensitivity = "normal"
+satellite_coincidence = "preferred"
+audience = "both"
+notes_fi = "Sadon ennustamisen kannalta tämä on oikea lentoajankohta — ei tuleentumisvaihe."
+notes_en = "This, not maturity, is the yield-relevant flight: indices decouple from LAI and biomass as leaves senesce."
+
+[[campaigns]]
+id = "disease_watch"
+label_fi = "Kasvitautiseuranta"
+label_en = "Disease watch"
+purpose = "Repeated canopy imaging for pre-symptomatic disease signal"
+decision_supported = "fungicide decision support"
+trigger_type = "cadence"
+trigger_stage = "flag_leaf"
+offset_days = 0
+window_before_days = 2
+window_after_days = 3
+hard_deadline_stage = "grain_fill_mid"
+required_gsd_cm = 2.0
+sensor = "both"
+overlap_front = 0.80
+overlap_side = 0.70
+priority = "normal"
+weather_sensitivity = "normal"
+audience = "farmer"
+drone_spray_related = true
+notes_fi = "Tuottaa kartan MAALEVITTIMELLE. UAV-RGB-aikasarjassa on havaittu muutos 7–14 vrk ennen näkyvää keltaruostetta ja 5–10 vrk ennen lehtiruostetta."
+notes_en = "Produces a map for a GROUND sprayer. UAV RGB time series showed spectral change 7-14 d before visible stripe rust and 5-10 d before leaf rust, while visual severity was still below the usual decision thresholds."
+
+[campaigns.repeat]
+mode = "cadence"
+every_days = 7
+max_count = 3
+
+[[campaigns]]
+id = "anthesis_marker"
+label_fi = "Kukinnan merkkilento"
+label_en = "Anthesis marker"
+purpose = "Fix the anthesis date for the FHB-critical window"
+decision_supported = "FHB fungicide timing"
+trigger_type = "stage"
+trigger_stage = "anthesis"
+offset_days = 0
+window_before_days = 3
+window_after_days = 3
+hard_deadline_stage = "grain_fill_mid"
+required_gsd_cm = 3.0
+sensor = "multispectral"
+overlap_front = 0.80
+overlap_side = 0.70
+priority = "high"
+weather_sensitivity = "high"
+audience = "farmer"
+drone_spray_related = true
+notes_fi = "Kova ja kapea ikkuna: FHB-torjunta-aika on vain muutama vrk kukinnan ympärillä. Yksi pilvinen kahden viikon jakso syö sen kokonaan — tässä lennokin ajoitus voittaa satelliitin."
+notes_en = "Hard and narrow: the FHB window spans just a few days around anthesis, and one cloudy fortnight consumes it entirely. This is where drone timing beats satellite outright. Produces a map for a GROUND sprayer."
+
+[[campaigns]]
+id = "lodging_survey"
+label_fi = "Lakoutumiskartoitus"
+label_en = "Lodging survey"
+purpose = "Extent and pattern of lodged crop after a storm"
+decision_supported = "combine routing, insurance evidence, yield-loss estimate"
+trigger_type = "weather_event"
+event_gust_ms = 15.0
+event_lookback_hours = 72
+offset_days = 3
+window_before_days = 1
+window_after_days = 5
+required_gsd_cm = 2.5
+sensor = "rgb"
+overlap_front = 0.80
+overlap_side = 0.75
+priority = "normal"
+weather_sensitivity = "high"
+audience = "farmer"
+notes_fi = "Tapahtumaohjattu: laukeaa havaitusta puuskasta, ei kasvuasteesta. Kasvustomalli (CHM) auttaa laajuuden arvioinnissa."
+notes_en = "Event-triggered, not phenology-triggered: fires on an observed gust. A canopy height model helps quantify the extent."
+
+[[campaigns]]
+id = "maturity_forecast"
+label_fi = "Tuleentumisen ennuste"
+label_en = "Maturity forecast"
+purpose = "Senescence trajectory across parcels"
+decision_supported = "harvest sequencing across parcels and combines"
+trigger_type = "cadence"
+trigger_stage = "grain_fill_mid"
+offset_days = 0
+window_before_days = 3
+window_after_days = 5
+hard_deadline_stage = "harvest_ready"
+required_gsd_cm = 3.0
+sensor = "multispectral"
+overlap_front = 0.80
+overlap_side = 0.70
+priority = "normal"
+weather_sensitivity = "normal"
+audience = "farmer"
+notes_fi = "Riittää lohkojen JÄRJESTÄMISEEN, ei päivämäärän asettamiseen. Sadon ennustetarkkuus on tuleentuessa huonoimmillaan."
+notes_en = "Good enough to SEQUENCE parcels, not to set a date. Senescence indices correlate with days-to-maturity at |r| > 0.85, but yield prediction is least accurate at maturity."
+
+[campaigns.repeat]
+mode = "cadence"
+every_days = 10
+max_count = 3
+
+[[campaigns]]
+id = "preharvest_reference"
+label_fi = "Sadonkorjuuta edeltävä referenssi"
+label_en = "Pre-harvest reference"
+purpose = "Final pre-harvest canopy state"
+decision_supported = "pairs with the combine yield map for validation"
+trigger_type = "stage"
+trigger_stage = "yellow_ripe"
+offset_days = 0
+window_before_days = 5
+window_after_days = 3
+hard_deadline_stage = "harvest_ready"
+required_gsd_cm = 3.0
+sensor = "both"
+overlap_front = 0.80
+overlap_side = 0.70
+priority = "normal"
+weather_sensitivity = "normal"
+audience = "both"
+notes_fi = "Viimeinen tilannekuva ennen puintia; verrataan puimurin satokarttaan."
+notes_en = "Last state before the combine; pairs with yield-map validation."
+
+[[campaigns]]
+id = "catch_crop_biomass"
+label_fi = "Kerääjäkasvin biomassa"
+label_en = "Catch-crop biomass"
+purpose = "Catch-crop biomass and C:N as carbon-input evidence"
+decision_supported = "carbon-input evidence, next season's N credit"
+trigger_type = "stage"
+trigger_stage = "establishment"
+offset_days = 35           # ~4-6 weeks after the cereal harvest
+window_before_days = 7
+window_after_days = 14
+required_gsd_cm = 3.0
+sensor = "multispectral"
+overlap_front = 0.80
+overlap_side = 0.70
+priority = "normal"
+weather_sensitivity = "high"
+audience = "researcher"
+notes_fi = "Syksy: auringon korkeus on sitova rajoite, ei lämpösumma. NDVI arvioi biomassan luotettavasti vain n. 1,5 Mg/ha asti, ja hallan aiheuttama vanheneminen katkaisee riippuvuuden vaikka lehtimassaa olisi jäljellä."
+notes_en = "Autumn: solar elevation is the binding constraint, not thermal time. NDVI estimates biomass reliably only below ~1.5 Mg/ha, and frost senescence breaks the relationship while leafy biomass remains. NDRE relates to biomass, total N and C:N."
+
+[[campaigns]]
+id = "s2_calibration"
+label_fi = "Sentinel-2-ristikalibrointi"
+label_en = "Sentinel-2 cross-calibration"
+purpose = "UAV-resolution truth aggregated to the 10/20 m pixel"
+decision_supported = "20 m pixel model calibration (Hiilisyke); quantifies the upscaling bias"
+trigger_type = "cadence"
+trigger_stage = "stem_elong"
+offset_days = 0
+window_before_days = 5
+window_after_days = 5
+hard_deadline_stage = "yellow_ripe"
+required_gsd_cm = 4.0
+sensor = "multispectral"
+overlap_front = 0.80
+overlap_side = 0.70
+priority = "normal"
+weather_sensitivity = "high"
+satellite_coincidence = "required"
+audience = "researcher"
+notes_fi = "Lennon on katettava kokonaisia S2-pikseleitä marginaalilla, ei rispaantunutta lohkon reunaa. Karkeisiin pikseleihin suoraan yleistäminen aliarvioi biomassan 8,9–17 % ja GPP:n 5,0–9,7 %, eikä harha ole yleistettävissä alueelta toiselle."
+notes_en = "Must cover whole S2 pixels with margin, not a ragged parcel edge. Upscaling ground plots straight to coarse pixels underestimated biomass by 8.9-17 % and GPP by 5.0-9.7 %, and the bias varies between areas and seasons, so no general correction exists."
+
+# Adaptive cadence: fly again once the crop has moved on by this much thermal
+# time, rather than after a fixed number of days.  More defensible than a
+# calendar interval because it tracks the crop, and costs nothing extra — the
+# thermal-time series is already computed.
+[campaigns.repeat]
+mode = "thermal"
+every_gdd = 200.0
+max_count = 4

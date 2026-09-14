@@ -1,0 +1,64 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "dkk-flightmanager-season"
+version = "0.1.0"
+description = "Growing-season flight planning (kasvukauden kuvaussuunnittelu) for dkk-flightmanager"
+requires-python = ">=3.11"
+# Deliberately a small dependency set.  This repo is an *overlay* on
+# SeAMKedu/dkk-flightmanager: the season package lives at the path it will
+# occupy there (src/flightmanager/season/) and reuses that project's config,
+# job store and forecast plumbing at run time.  None of that is imported at
+# module scope, so the engine is installable and testable on its own.
+dependencies = [
+    "pydantic>=2.0",
+    "requests>=2.31",
+    "typer>=0.12",
+    "tomlkit>=0.13",
+]
+
+[project.optional-dependencies]
+# Only needed when the season CLI / REST router is exercised outside the host
+# application.  Inside dkk-flightmanager these are already present.
+host = [
+    "fastapi>=0.111",
+    "filelock>=3.12",
+]
+
+[dependency-groups]
+dev = [
+    "pytest>=8.0",
+    "pytest-cov>=5.0",
+    "responses>=0.25",
+    "ruff>=0.4",
+]
+
+[tool.setuptools.packages.find]
+# No src/flightmanager/__init__.py on purpose: `flightmanager` stays an implicit
+# namespace package here, so `flightmanager.season` imports standalone, and the
+# same directory drops straight into the host project's real `flightmanager/`
+# package without a duplicate __init__.py to reconcile.
+where = ["src"]
+namespaces = true
+
+[tool.setuptools.package-data]
+"flightmanager.season" = ["*.toml"]
+
+[tool.ruff]
+src = ["src"]
+
+[tool.ruff.lint]
+select = ["E", "F", "C901"]
+ignore = ["E501"]
+
+[tool.ruff.lint.mccabe]
+max-complexity = 10
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-v --tb=short"
+markers = [
+    "integration: hits live network services — run with -m integration",
+]
